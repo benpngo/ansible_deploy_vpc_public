@@ -1,0 +1,9 @@
+---
+- name: Deploy Main VPC
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - aws/vars/main_vpc/main.yml
+  tasks:
+    - import_tasks: aws/tasks/main_vpc/main.yml

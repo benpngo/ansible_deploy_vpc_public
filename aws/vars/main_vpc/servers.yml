@@ -1,0 +1,11 @@
+---
+webserver:
+  - group: Webservers
+    in_type: t2.micro
+    image: ami-9cbf9bf9
+    count: 1
+    tags:
+      Name: "{{ env_type }}.web.{{ internal_domain }}"
+    monitoring: no
+    pub_ip: no
+    count_tag: yes

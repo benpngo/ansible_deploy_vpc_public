@@ -1,0 +1,212 @@
+---
+- name: Deploy VPC
+  ec2_vpc_net:
+    name: '{{ vpc_name }}'
+    state: present
+    cidr_block: '{{ vpc_cidr }}'
+    region: '{{ vpc_region }}'
+    dns_hostnames: yes
+    dns_support: yes
+    tags:
+      Environment: '{{ env_type }}'
+      Type: '{{ Type }}'
+  register: vpc
+
+- name: Internal Zone Creation
+  route53_zone:
+    zone: '{{ internal_domain }}'
+    state: present
+    comment: "{{internal_domain_comment}}"
+    vpc_region: '{{ vpc_region }}'
+    vpc_id: '{{ vpc.vpc.id }}'
+
+- name: Set DHCP to internal domain
+  ec2_vpc_dhcp_option:
+    domain_name: '{{ internal_domain }}'
+    dns_servers:
+      - '{{ amazondnsserver }}'
+    region: '{{ vpc_region }}'
+    vpc_id: '{{ vpc.vpc.id }}'
+    inherit_existing: False
+  register: dhcp_create
+
+- name: Attach Internet Gateway
+  ec2_vpc_igw:
+    vpc_id: '{{ vpc.vpc.id }}'
+    state: present
+    region: '{{ vpc_region }}'
+    tags:
+      Name: '{{ vpc_name }}-igw'
+  register: igw_create
+
+- name: Create subnets for VPC
+  ec2_vpc_subnet:
+    state: present
+    vpc_id: '{{ vpc.vpc.id }}'
+    cidr: '{{ item.cidr }}'
+    region: '{{ vpc_region }}'
+    az: '{{ item.az }}'
+  register: subnet_create
+  with_items: '{{ subnets }}'
+
+- name: Update subnet with tags, the code in the module has a messed up tag function that's not idempotent
+  ec2_vpc_subnet:
+    state: present
+    vpc_id: '{{ vpc.vpc.id }}'
+    cidr: '{{ item.cidr }}'
+    tags:
+      Name: '{{ item.type }}'
+      Public: '{{ item.public }}'
+      NAT: '{{ item.attach_nat }}'
+  with_items: '{{ subnets }}'
+  when: subnet_create.changed
+
+- name: Get subnet facts
+  ec2_vpc_subnet_facts:
+    filters:
+      vpc-id: '{{ vpc.vpc.id }}'
+    region: '{{ vpc_region }}'
+  register: subnet_facts
+
+- name: Create a list of Public ids
+  set_fact:
+    public_ids: "{{ public_ids|default([]) + [item.id] }}"
+  with_items: '{{ subnet_facts.subnets }}'
+  when: item.tags.Public == "True"
+
+- name: Create a list of Private ids
+  set_fact:
+    private_ids: "{{ private_ids|default([]) + [item.id] }}"
+  with_items: '{{ subnet_facts.subnets }}'
+  when: item.tags.Public == "False"
+
+- name: Create NAT Gateway
+  ec2_vpc_nat_gateway:
+    state: present
+    subnet_id: '{{ item.id }}'
+    wait: yes
+    region: '{{ vpc_region }}'
+    if_exist_do_not_create: true
+  register: nat_create
+  with_items: '{{ subnet_facts.subnets }}'
+  when: item.tags.NAT == "True"
+
+- name: Get NATGW facts
+  ec2_vpc_nat_gateway_facts:
+    region: '{{ vpc_region }}'
+    filters:
+      vpc-id: '{{ vpc.vpc.id }}'
+  register: nat_facts
+
+- name: Get the NAT GW ID
+  set_fact:
+    nat_gw_id: '{{ item.nat_gateway_id }}'
+  with_items: '{{ nat_facts.result }}'
+  when: item.state == "available"
+
+- name: Get route tables for vpc
+  ec2_vpc_route_table_facts:
+    filters:
+      vpc-id: '{{ vpc.vpc.id }}'
+    region: '{{ vpc_region }}'
+  register: route_facts
+
+- debug:
+    var: route_facts
+
+- name: Set private route table to NAT GW and Peering VPC
+  ec2_vpc_route_table:
+    vpc_id: '{{ vpc.vpc.id }}'
+    region: '{{ vpc_region }}'
+    subnets: '{{ private_ids }}'
+    route_table_id: '{{ item.0.id }}'
+    state: present
+    lookup: id
+    routes:
+      - dest: '{{ customer_network }}'
+        vpc_peering_connection_id: '{{ peering_id }}'
+      - dest: 0.0.0.0/0
+        gateway_id: '{{ nat_gw_id }}'
+    tags:
+      Name: Internal
+  register: private_routes_create
+  with_subelements:
+    - '{{ route_facts.route_tables }}'
+    - associations
+  when: item.1.main == true
+
+- name: Set public route table to IGW and Peering VPC
+  ec2_vpc_route_table:
+    vpc_id: '{{ vpc.vpc.id }}'
+    region: '{{ vpc_region }}'
+    subnets: '{{ public_ids }}'
+    state: present
+    routes:
+      - dest: '{{ customer_network }}'
+        vpc_peering_connection_id: '{{ peering_id }}'
+      - dest: 0.0.0.0/0
+        gateway_id: '{{ igw_create.gateway_id }}'
+    tags:
+      Name: External
+  register: public_route_create
+
+#- name: Set private route table to NAT GW #and VGW
+#  ec2_vpc_route_table:
+#    vpc_id: '{{ vpc.vpc.id }}'
+#    region: '{{ vpc_region }}'
+#    subnets: '{{ private_ids }}'
+#    route_table_id: '{{ item.0.id }}'
+#    state: present
+#    lookup: id
+#    routes:
+#      - dest: 0.0.0.0/0
+#        gateway_id: '{{ nat_gw_id }}'
+#    tags:
+#      Name: Internal
+#  register: private_routes_create
+#  with_subelements:
+#    - '{{ route_facts.route_tables }}'
+#    - associations
+#  when: item.1.main == true
+#- name: Set public route table to IGW
+#  ec2_vpc_route_table:
+#    vpc_id: '{{ vpc.vpc.id }}'
+#    region: '{{ vpc_region }}'
+#    subnets: '{{ public_ids }}'
+#    state: present
+#    routes:
+#      - dest: 0.0.0.0/0
+#        gateway_id: '{{ igw_create.gateway_id }}'
+#    tags:
+#      Name: External
+#  register: public_route_create
+#  when: public_route_create|skipped
+
+- name: Create ACL rules for all subnets
+  ec2_vpc_nacl:
+    vpc_id: '{{ vpc.vpc.id }}'
+    name: '{{ vpc_name }}-{{ item.type }}-acl'
+    region: '{{ vpc_region }}'
+    subnets: '{{ item.type }}'
+    ingress: '{{ item.ingress }}'
+    egress: '{{ item.egress }}'
+    tags:
+      Environment: '{{ env_type }}'
+    state: present
+  register: acl_create
+  with_items: '{{ subnets }}'
+
+- name: Create Security Groups for instances
+  ec2_group:
+    vpc_id: '{{ vpc.vpc.id }}'
+    region: '{{ vpc_region }}'
+    name: '{{ item.name }}'
+    description: "SG for {{ item.name }}"
+    state: present
+    rules: '{{ item.ingress }}'
+    rules_egress: '{{ item.egress }}'
+    tags:
+      Name: '{{ item.name }}'
+  with_items: '{{ security_groups }}'
+  register: sg_create
+

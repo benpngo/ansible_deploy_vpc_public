@@ -1,0 +1,107 @@
+---
+env_type: dev
+Type: Infrastructure
+vpc_name: test
+vpc_region: us-east-2
+vpc_cidr: 10.10.0.0/16
+internal_domain: internal.domain
+internal_domain_comment: 'Domain for our internal network'
+amazondnsserver: 10.10.0.2 # Always base cidr + 2
+customer_network: 172.16.0.0/16
+peering_id: '{{ peering_id }}'
+subnets:
+  - type: 'Public'
+    cidr: '10.10.1.0/24'
+    public: true
+    attach_nat: true
+    az: "{{ vpc_region }}a"
+    ingress:
+      - [100, 'tcp', 'allow', '0.0.0.0/0', null, null, 80, 80]
+      - [110, 'tcp', 'allow', '0.0.0.0/0', null, null, 443, 443]
+      - [120, 'tcp', 'allow', '0.0.0.0/0', null, null, 1024, 65535]
+      - [130, 'all', 'allow', '{{ customer_network }}', null, null, null, null]
+    egress:
+      - [100, 'tcp', 'allow', '0.0.0.0/0', null, null, 80, 80]
+      - [110, 'tcp', 'allow', '0.0.0.0/0', null, null, 443, 443]
+      - [120, 'tcp', 'allow', '0.0.0.0/0', null, null, 1024, 65535]
+      - [130, 'all', 'allow', '{{ customer_network }}', null, null, null, null]
+  - type: 'App'
+    cidr: '10.10.2.0/24'
+    public: false
+    attach_nat: false
+    az: "{{ vpc_region }}b"
+    ingress:
+      - [100, 'tcp', 'allow', '0.0.0.0/0', null, null, 1024, 65535]
+      - [110, 'all', 'allow', '{{ customer_network }}', null, null, null, null]
+    egress:
+      - [100, 'tcp', 'allow', '0.0.0.0/0', null, null, 80, 80]
+      - [110, 'tcp', 'allow', '0.0.0.0/0', null, null, 443, 443]
+      - [120, 'tcp', 'allow', '0.0.0.0/0', null, null, 1024, 65535]
+      - [130, 'tcp', 'allow', '10.10.3.0/24', null, null, 5432, 5432]
+      - [140, 'all', 'allow', '{{ customer_network }}', null, null, null, null]
+  - type: 'DB'
+    cidr: '10.10.3.0/24'
+    public: false
+    attach_nat: false
+    az: "{{ vpc_region }}c"
+    ingress:
+      - [100, 'tcp', 'allow', '0.0.0.0/0', null, null, 1024, 65535]
+      - [120, 'tcp', 'allow', '10.10.2.0/24', null, null, 5432, 5432]
+      - [130, 'all', 'allow', '{{ customer_network }}', null, null, null, null]
+    egress:
+      - [100, 'tcp', 'allow', '0.0.0.0/0', null, null, 80, 80]
+      - [110, 'tcp', 'allow', '0.0.0.0/0', null, null, 443, 443]
+      - [120, 'tcp', 'allow', '0.0.0.0/0', null, null, 1024, 65535]
+      - [130, 'all', 'allow', '{{ customer_network }}', null, null, null, null]
+security_groups:
+  - name: 'Webservers'
+    ingress:
+      - proto: tcp
+        ports:
+          - 80
+          - 443
+          - 1024-65535
+        cidr_ip: 0.0.0.0/0
+      - proto: all
+        cidr_ip: '{{ customer_network }}'
+    egress:
+      - proto: tcp
+        ports:
+          - 80
+          - 443
+          - 1024-65535
+        cidr_ip: 0.0.0.0/0
+      - proto: all
+        cidr_ip: '{{ customer_network }}'
+  - name: 'Appservers'
+    ingress:
+      - proto: all
+        cidr_ip: '{{ customer_network }}'
+    egress:
+      - proto: tcp
+        ports:
+          - 80
+          - 443
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        ports: 5432
+        cidr_ip: 10.10.3.0/24
+      - proto: all
+        cidr_ip: '{{ customer_network }}'
+  - name: 'DBservers'
+    ingress:
+      - proto: tcp
+        ports: 5432
+        cidr_ip: 10.10.2.0/24
+      - proto: all
+        cidr_ip: '{{ customer_network }}'
+    egress:
+      - proto: tcp
+        ports:
+          - 80
+          - 443
+        cidr_ip: 0.0.0.0/0
+      - proto: all
+        cidr_ip: '{{ customer_network }}'
+
+

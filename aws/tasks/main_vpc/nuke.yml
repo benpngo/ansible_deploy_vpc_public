@@ -1,0 +1,124 @@
+---
+- name: Get the correct VPC
+  ec2_vpc_net_facts:
+    filters:
+      "tag:Environment": '{{ env_type }}'
+    region: '{{ vpc_region }}'
+  register: vpc
+
+- name: Get all instances
+  ec2_instance_facts:
+    region: '{{ vpc_region }}'
+    filters:
+      vpc-id: '{{ vpc.vpcs[0].id }}'
+  register: ec2_instances
+
+- name: Delete all instances
+  ec2:
+    region: '{{ vpc_region }}'
+    instance_ids: '{{ item.instance_id }}'
+    state: absent
+    wait: yes
+  with_items: '{{ ec2_instances.instances }}'
+
+- name: Delete Internal Domain
+  route53_zone:
+    zone: '{{ internal_domain }}'
+    state: absent
+    vpc_region: '{{ vpc_region }}'
+    vpc_id: '{{ vpc.vpcs[0].id }}'
+
+- name: Get NGW ID
+  ec2_vpc_nat_gateway_facts:
+    region: '{{ vpc_region }}'
+    filters:
+      vpc-id: '{{ vpc.vpcs[0].id }}'
+  register: ngwid
+
+- name: Delete nat gateway using discovered nat gateways from facts module
+  ec2_vpc_nat_gateway:
+    state: absent
+    region: '{{ vpc_region }}'
+    wait: yes
+    nat_gateway_id: "{{ item.nat_gateway_id }}"
+    release_eip: yes
+  register: delete_nat_gateway_result
+  with_items: '{{ ngwid.result }}'
+  changed_when: false
+
+- name: Delete Internet Gateway
+  ec2_vpc_igw:
+    vpc_id: '{{ vpc.vpcs[0].id }}'
+    state: absent
+    region: '{{ vpc_region }}'
+    tags:
+      Name: '{{ vpc_name }}-igw'
+  register: igw_delete
+
+- name: Delete subnets for VPC
+  ec2_vpc_subnet:
+    state: absent
+    vpc_id: '{{ vpc.vpcs[0].id }}'
+    cidr: '{{ item.cidr }}'
+    region: '{{ vpc_region }}'
+    az: '{{ item.az }}'
+  register: subnet_delete
+  with_items: '{{ subnets }}'
+
+- name: Get route tables for vpc
+  ec2_vpc_route_table_facts:
+    filters:
+      vpc_id: '{{ vpc.vpcs[0].id }}'
+    region: '{{ vpc_region }}'
+  register: route_facts
+
+- name: Delete non main route tables
+  ec2_vpc_route_table:
+    vpc_id: '{{ vpc.vpcs[0].id }}'
+    region: '{{ vpc_region }}'
+    state: absent
+    lookup: tag
+    tags:
+      Name: External
+  register: private_routes_delete
+
+- name: Get nacls for vpc
+  ec2_vpc_nacl_facts:
+    region: '{{ vpc_region }}'
+    filters:
+      vpc-id: '{{ vpc.vpcs[0].id }}'
+  register: nacl_facts
+
+- name: Delete ACL rules for all subnets
+  ec2_vpc_nacl:
+    vpc_id: '{{ vpc.vpcs[0].id }}'
+    region: '{{ vpc_region }}'
+    nacl_id: '{{ item.nacl_id }}'
+    state: absent
+  register: acl_delete
+  with_items: '{{ nacl_facts.nacls }}'
+  when: item.is_default == false
+
+- name: Get SGs for vpc
+  ec2_group_facts:
+    region: '{{ vpc_region }}'
+    filters:
+      vpc-id: '{{ vpc.vpcs[0].id }}'
+  register: sg_facts
+
+- name: Delete SGs in VPC
+  ec2_group:
+    vpc_id: '{{ vpc.vpcs[0].id }}'
+    region: '{{ vpc_region }}'
+    group_id: '{{ item.group_id }}'
+    state: absent
+  with_items: '{{ sg_facts.security_groups }}'
+  when: item.group_name != "default"
+
+- name: Delete VPC
+  ec2_vpc_net:
+    name: '{{ vpc_name }}'
+    state: absent
+    region: '{{ vpc_region }}'
+    cidr_block: '{{ vpc_cidr }}'
+  register: vpc_delete

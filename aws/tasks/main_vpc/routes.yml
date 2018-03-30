@@ -1,0 +1,77 @@
+---
+- name: Get route tables for vpc
+  ec2_vpc_route_table_facts:
+    filters:
+      vpc-id: '{{ vpc.vpc.id }}'
+    region: '{{ vpc_region }}'
+  register: route_facts
+
+- name: Set private route table to NAT GW and Peering VPC
+  ec2_vpc_route_table:
+    vpc_id: '{{ vpc.vpc.id }}'
+    region: '{{ vpc_region }}'
+    subnets: '{{ private_ids }}'
+    route_table_id: '{{ item.0.id }}'
+    state: present
+    lookup: id
+    routes:
+      - dest: '{{ customer_network }}'
+        vpc_peering_connection_id: '{{ peering_id }}'
+      - dest: 0.0.0.0/0
+        gateway_id: '{{ nat_gw_id }}'
+    tags:
+      Name: Internal
+  register: private_routes_create
+  with_subelements:
+    - '{{ route_facts.route_tables }}'
+    - associations
+  when: item.1.main == true and peering_id is defined
+
+- name: Set public route table to IGW and Peering VPC
+  ec2_vpc_route_table:
+    vpc_id: '{{ vpc.vpc.id }}'
+    region: '{{ vpc_region }}'
+    subnets: '{{ public_ids }}'
+    state: present
+    routes:
+      - dest: '{{ customer_network }}'
+        vpc_peering_connection_id: '{{ peering_id }}'
+      - dest: 0.0.0.0/0
+        gateway_id: '{{ igw_create.gateway_id }}'
+    tags:
+      Name: External
+  register: public_route_create
+  when: peering_id is defined
+
+- name: Set private route table to NAT GW #and VGW
+  ec2_vpc_route_table:
+    vpc_id: '{{ vpc.vpc.id }}'
+    region: '{{ vpc_region }}'
+    subnets: '{{ private_ids }}'
+    route_table_id: '{{ item.0.id }}'
+    state: present
+    lookup: id
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: '{{ nat_gw_id }}'
+    tags:
+      Name: Internal
+  register: private_routes_create
+  with_subelements:
+    - '{{ route_facts.route_tables }}'
+    - associations
+  when: item.1.main == true and private_routes_create|skipped
+
+- name: Set public route table to IGW
+  ec2_vpc_route_table:
+    vpc_id: '{{ vpc.vpc.id }}'
+    region: '{{ vpc_region }}'
+    subnets: '{{ public_ids }}'
+    state: present
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: '{{ igw_create.gateway_id }}'
+    tags:
+      Name: External
+  register: public_route_create
+  when: public_route_create|skipped
